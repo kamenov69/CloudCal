@@ -1,0 +1,161 @@
+name: Build CloudCal for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare portable R and CloudCal
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $PWD 'CloudCal-Windows-x64'
+          $app = Join-Path $bundle 'app'
+          New-Item -ItemType Directory -Path $app | Out-Null
+          New-Item -ItemType Directory -Path "$bundle\R-library" | Out-Null
+
+          git archive --format=zip --output=cloudcal-source.zip HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Expand-Archive cloudcal-source.zip -DestinationPath $app
+          if (Test-Path "$app\.github") {
+            Remove-Item "$app\.github" -Recurse
+          }
+
+          $url = 'https://github.com/portable-r/portable-r-windows/releases/download/v4.6.2/portable-r-4.6.2-win-x64.zip'
+          Invoke-WebRequest -Uri $url -OutFile portable-r.zip
+          Expand-Archive portable-r.zip -DestinationPath "$bundle\R"
+
+      - name: Install R packages
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $PWD 'CloudCal-Windows-x64'
+          $rscript = Get-ChildItem "$bundle\R" -Recurse -Filter Rscript.exe |
+            Select-Object -First 1
+          if (-not $rscript) { throw 'Rscript.exe not found' }
+
+          $env:R_LIBS_USER = "$bundle\R-library"
+          Set-Location "$bundle\app"
+
+          @'
+          options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+          # Read the declared package list without running global.R.
+          expressions <- as.list(parse("global.R"))
+          declarations <- Filter(function(x) {
+            is.call(x) && length(x) == 3L &&
+              identical(x[[1L]], as.name("<-")) &&
+              identical(x[[2L]], as.name("list.of.packages"))
+          }, expressions)
+          stopifnot(length(declarations) == 1L)
+
+          packages <- unique(c(
+            eval(declarations[[1L]][[3L]], envir = baseenv()),
+            "Rcpp", "nnls", "ggrepel", "readr", "tidyr", "stringr"
+          ))
+          missing <- setdiff(packages, rownames(installed.packages()))
+          if (length(missing)) install.packages(missing, type = "binary")
+
+          for (archive in c(
+            "rPDZ_2.0.3.zip", "Peaks_0.3.zip", "xrftools_0.0.3.zip"
+          )) {
+            path <- file.path("Packages", archive)
+            stopifnot(file.exists(path))
+            install.packages(path, repos = NULL, type = "win.binary")
+          }
+
+          if (!requireNamespace("caret", quietly = TRUE)) {
+            install.packages(
+              "Packages/caret_6.0.93.1.zip", repos = NULL, type = "win.binary"
+            )
+          }
+
+          for (pkg in c("shiny", "xrftools", "rPDZ", "Peaks", "caret")) {
+            loadNamespace(pkg)
+          }
+          stopifnot(as.character(packageVersion("rPDZ")) == "2.0.3")
+          stopifnot(as.character(packageVersion("xrftools")) == "0.0.3")
+          '@ | Set-Content "$env:RUNNER_TEMP\install-cloudcal.R"
+
+          & $rscript.FullName --vanilla "$env:RUNNER_TEMP\install-cloudcal.R"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create starter and ZIP
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $PWD 'CloudCal-Windows-x64'
+          $rscript = Get-ChildItem "$bundle\R" -Recurse -Filter Rscript.exe |
+            Select-Object -First 1
+          $relativeR = $rscript.FullName.Substring($bundle.Length + 1)
+
+          @'
+          @echo off
+          setlocal
+          set "R_LIBS_USER=%~dp0R-library"
+          pushd "%~dp0app" || exit /b 1
+          "%~dp0__RSCRIPT__" --vanilla -e "shiny::runApp('.', host='127.0.0.1', port=3838, launch.browser=TRUE)"
+          if errorlevel 1 pause
+          popd
+          '@.Replace('__RSCRIPT__', $relativeR) |
+            Set-Content "$bundle\Start-CloudCal.bat" -Encoding ascii
+
+          Compress-Archive -Path $bundle -DestinationPath CloudCal-Windows-x64.zip
+
+      - name: Test the extracted ZIP
+        shell: pwsh
+        run: |
+          $testDir = Join-Path $env:RUNNER_TEMP 'CloudCal test extract'
+          Expand-Archive CloudCal-Windows-x64.zip -DestinationPath $testDir
+          $bundle = Join-Path $testDir 'CloudCal-Windows-x64'
+          $rscript = Get-ChildItem "$bundle\R" -Recurse -Filter Rscript.exe |
+            Select-Object -First 1
+          $env:R_LIBS_USER = "$bundle\R-library"
+
+          $script = Join-Path $env:RUNNER_TEMP 'start-cloudcal-test.R'
+          "shiny::runApp('.', host='127.0.0.1', port=3838, launch.browser=FALSE)" |
+            Set-Content $script
+          $stdout = Join-Path $env:RUNNER_TEMP 'cloudcal-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'cloudcal-stderr.log'
+
+          $process = Start-Process -FilePath $rscript.FullName `
+            -ArgumentList @('--vanilla', ('"{0}"' -f $script)) `
+            -WorkingDirectory "$bundle\app" `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+            -PassThru
+
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              $process.Refresh()
+              if ($process.HasExited) { break }
+              try {
+                $response = Invoke-WebRequest 'http://127.0.0.1:3838/' -TimeoutSec 3
+                if ($response.StatusCode -eq 200 -and $response.Content -match 'shiny') {
+                  $ready = $true
+                  break
+                }
+              } catch {
+                Start-Sleep -Seconds 2
+              }
+            }
+            if (-not $ready) { throw 'CloudCal did not serve the Shiny page' }
+            Write-Host 'CloudCal served the Shiny page from the extracted ZIP.'
+          } finally {
+            $process.Refresh()
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id }
+            Get-Content $stdout, $stderr
+          }
+
+      - name: Upload Windows ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: CloudCal-Windows-x64
+          path: CloudCal-Windows-x64.zip
+          if-no-files-found: error
