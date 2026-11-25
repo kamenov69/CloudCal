@@ -1,0 +1,31 @@
+name: CloudCal Windows test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download portable R
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/portable-r/portable-r-windows/releases/download/v4.6.2/portable-r-4.6.2-win-x64.zip'
+          Invoke-WebRequest -Uri $url -OutFile portable-r.zip
+          Expand-Archive portable-r.zip -DestinationPath portable-r
+
+      - name: Test xrftools
+        shell: pwsh
+        run: |
+          $rscript = Get-ChildItem portable-r -Recurse -Filter Rscript.exe |
+            Select-Object -First 1
+          if (-not $rscript) { throw 'Rscript.exe not found' }
+
+          New-Item -ItemType Directory -Path R-library -Force | Out-Null
+          $env:R_LIBS_USER = (Resolve-Path R-library).Path
+
+          & $rscript.FullName --vanilla -e "install.packages(c('Rcpp', 'nnls'), repos='https://cloud.r-project.org', type='binary'); install.packages('Packages/xrftools_0.0.3.zip', repos=NULL, type='win.binary'); library(xrftools); print(packageVersion('xrftools'))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
