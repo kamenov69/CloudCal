@@ -27,5 +27,5 @@ jobs:
           New-Item -ItemType Directory -Path R-library -Force | Out-Null
           $env:R_LIBS_USER = (Resolve-Path R-library).Path
 
-          & $rscript.FullName --vanilla -e "install.packages(c('Rcpp', 'nnls', 'dplyr'), repos='https://cloud.r-project.org', type='binary'); install.packages('Packages/xrftools_0.0.3.zip', repos=NULL, type='win.binary'); library(xrftools); print(packageVersion('xrftools'))"
+          & $rscript.FullName --vanilla -e "install.packages(c('rlang', 'dplyr', 'purrr', 'tibble', 'tidyr', 'readr', 'magrittr', 'stringr', 'Rcpp', 'ggplot2', 'ggrepel', 'nnls', 'Matrix'), repos='https://cloud.r-project.org', type='binary'); install.packages('Packages/xrftools_0.0.3.zip', repos=NULL, type='win.binary'); library(xrftools); print(packageVersion('xrftools'))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
